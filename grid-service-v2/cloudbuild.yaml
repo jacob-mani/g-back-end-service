@@ -1,0 +1,299 @@
+steps:
+  - id: login
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        docker login -u=$$USERNAME -p=$$PASSWORD fcr.ford.com
+    secretEnv: [ "USERNAME", "PASSWORD" ]
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'fix-workspace-permissions'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        set -e
+        chmod a+w /workspace
+        mkdir -p /workspace/.gradle
+        chmod -R a+rwX /workspace/.gradle
+  - name: fcr.ford.com/devenablement/tekton-java21:latest
+    id: "gradle build"
+    secretEnv: [ "JFROG_USERNAME", "JFROG_TOKEN", "FOSSA_API_KEY", "CHECKMARX_PASSWORD", "SONARQUBE_TOKEN"]
+    env:
+      - "FOSSA_FLAG=${_FOSSA_FLAG}"
+      - "CHECK_MARX_FLAG=${_CHECK_MARX_FLAG}"
+      - "SONNAR_CUBE_FLAG=${_SONNAR_CUBE_FLAG}"
+      - "ENV_NAME=${_ENV_NAME}"
+      - "GRADLE_USER_HOME=/workspace/.gradle"
+      - "HOME=/workspace"
+    script: |
+      echo "*** Starting gradlew ***"
+      mkdir -p "$GRADLE_USER_HOME"
+      export JFROG_PASSWORD=$JFROG_TOKEN
+      export FOSSA_API_KEY=$FOSSA_API_KEY
+      export GRADLE_OPTS="-Dgradle.user.home=$GRADLE_USER_HOME -Dgradle.wrapperUser=$JFROG_USERNAME -Dgradle.wrapperPassword=$JFROG_TOKEN -Dhttps.nonProxyHosts=$GRADLE_NO_PROXY -Dhttps.proxyHost=$GRADLE_PROXY -Dhttps.proxyPort=83"
+      echo "FOSSA flag $FOSSA_FLAG"
+      if [ "${FOSSA_FLAG}" == "Y" ]; then
+       echo "*** Starting fossa-quality-checks-task ***"
+       fossa analyze -e "https://ford.fossa.com" -T 'GRID-52407' -p 'GRID-API-V2' -b grid-master --policy 'Internal Facing Use Only'
+       echo "*** Ending fossa-quality-checks-task ***"
+      else
+       echo "Skipping FOSSA analysis."
+      fi
+      
+      echo "CHECK_MARX flag $CHECK_MARX_FLAG"
+      if [ "${CHECK_MARX_FLAG}" == "Y" ]; then
+       echo "*** Starting checkmarx-quality-checks-task ***"
+       serverUrl="https://www.checkmarx.ford.com"
+       username="griddev"
+       password=$CHECKMARX_PASSWORD
+       projectName="CxServer/Ford Enterprise/Sustainability Environmental and Safety Engineering/Peak Performers/GRID"
+       locationPath="/workspace/"
+       includeExcludePattern="!**/_cvs/**/*, !**/.svn/**/*, !**/.npm/**/*, !**/node_modules/**/, !**/.hg/**/*, !**/.git/**/*, !**/.bzr/**/*,!**/.gitgnore/**/*, !**/.gradle/**/*, !**/.checkstyle/**/*, !**/.classpath/**/*, !**/bin/**/*,!**/obj/**/*, !**/backup/**/*, !**/.idea/**/*, !**/*.DS_Store, !**/*.ipr, !**/*.iws, !**/*.bak, !**/*.tmp, !**/*.aac, !**/*.aif, !**/*.iff, !**/*.m3u, !**/*.mid, !**/*.mp3,!**/*.mpa, !**/*.ra, !**/*.wav, !**/*.wma, !**/*.3g2, !**/*.3gp, !**/*.asf, !**/*.asx,!**/*.avi, !**/*.flv, !**/*.mov, !**/*.mp4, !**/*.mpg, !**/*.rm, !**/*.swf, !**/*.vob,!**/*.wmv, !**/*.bmp, !**/*.gif, !**/*.jpg, !**/*.png, !**/*.psd, !**/*.tif, !**/*.swf,!**/*.jar, !**/*.zip, !**/*.rar, !**/*.exe, !**/*.dll, !**/*.pdb, !**/*.7z, !**/*.gz,!**/*.tar.gz, !**/*.tar, !**/*.gz, !**/*.ahtm, !**/*.ahtml, !**/*.fhtml, !**/*.hdm,!**/*.hdml, !**/*.hsql, !**/*.ht, !**/*.hta, !**/*.htc, !**/*.htd, !**/*.war, !**/*.ear,!**/*.htmls, !**/*.ihtml, !**/*.mht, !**/*.mhtm, !**/*.mhtml, !**/*.ssi, !**/*.stm,!**/*.bin,!**/*.lock,!**/*.svg,!**/*.obj,!**/*.stml, !**/*.ttml, !**/*.txn, !**/*.xhtm, !**/*.xhtml, !**/*.class, !**/*.iml, !Checkmarx/Reports/*.*,!OSADependencies.json"
+       preset="Ford - Web Services"
+       touch /tmp/checkmarx.log
+       logFile="/tmp/checkmarx.log"
+       highVulnThreshold="0"
+       runCxConsole.sh scan \
+        -v -log $logFile \
+        -cxserver $serverUrl \
+        -cxuser $username \
+        -cxpassword $password \
+        -projectname "$projectName" \
+        -locationtype folder \
+        -locationpath $locationPath \
+        -includeexcludepattern "$includeExcludePattern" \
+        -Preset "$preset"
+       echo "*** Ending checkmarx-quality-checks-task ***"
+      else
+       echo "Skipping CHECK MARX analysis."
+      fi
+      
+      echo "JFROG_USERNAME $JFROG_USERNAME"
+      ./gradlew --no-daemon --gradle-user-home "$GRADLE_USER_HOME" clean build
+      
+      echo "SONNAR_CUBE_FLAG flag $SONNAR_CUBE_FLAG"
+      if [ "${SONNAR_CUBE_FLAG}" == "Y" ]; then
+       #Sonarqube scan
+       echo "*** $SONARQUBE_TOKEN Starting sonar-cube-quality-checks-task ***"
+       ./gradlew --no-daemon --gradle-user-home "$GRADLE_USER_HOME" sonar \
+       -Dsonar.projectKey=com.ford.grid.gridservice \
+       -Dsonar.host.url=https://www.sonarqube.ford.com \
+       -Dsonar.branch.name=${ENV_NAME} \
+       -Dsonar.token=$SONARQUBE_TOKEN
+      
+       echo "*** Ending Sonarqube Execution-task ***"
+      else
+       echo "Skipping Sonarqube Execution"
+      fi
+
+  - name: gcr.io/cloud-builders/docker
+    id: image-build
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        docker build --build-arg SPRING_PROFILES_ACTIVE=${_SPRING_PROFILES_ACTIVE} -t us-central1-docker.pkg.dev/$PROJECT_ID/grid-container-artifact-registry/grid-v2:1.0 .
+  - name: gcr.io/cloud-builders/docker
+    id: image-push
+    args:
+      - push
+      - >-
+        us-central1-docker.pkg.dev/$PROJECT_ID/grid-container-artifact-registry/grid-v2:1.0
+  - id: "Save Docker image as tar file"
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["image-build"]
+    entrypoint: bash
+    env:
+      - "JFROG_IMAGE_SCAN_FLAG=${_JFROG_IMAGE_SCAN_FLAG}"
+    args:
+      - -c
+      - |
+        if [ "$${JFROG_IMAGE_SCAN_FLAG}" == "Y" ]; then
+          echo "*** Starting Save Docker image as tar file ***"
+          docker tag us-central1-docker.pkg.dev/${PROJECT_ID}/${_GCP_DOCKER_REPOSITORY_NAME}/${_DOCKER_IMAGE}:1.0 ${LOCATION}-docker.pkg.dev/${PROJECT_ID}/${_GCP_DOCKER_REPOSITORY_NAME}/${_DOCKER_IMAGE}:${SHORT_SHA}
+          docker save --output /workspace/build-image.tar ${LOCATION}-docker.pkg.dev/${PROJECT_ID}/${_GCP_DOCKER_REPOSITORY_NAME}/${_DOCKER_IMAGE}:${SHORT_SHA}
+          docker inspect --format='{{index .RepoDigests 0}}' \
+            ${LOCATION}-docker.pkg.dev/${PROJECT_ID}/${_GCP_DOCKER_REPOSITORY_NAME}/${_DOCKER_IMAGE}:${SHORT_SHA} \
+            | cut -d'@' -f2 > /workspace/image-digest.txt || true
+          chmod a+rw -R /workspace/
+        else
+          echo "Skipping Save Docker image."
+        fi
+  # skopeo copies the image tar directly to JFrog — no Docker daemon or image load required.
+  - id: "Push image to Jfrog Artifactory"
+    name: fcr.ford.com/cybersecurity-devsecops/dso-utilities:ubi10.2
+    entrypoint: bash
+    secretEnv:
+      - JFROG_USERNAME
+      - JFROG_TOKEN
+    env:
+      - "https_proxy=http://internet.gcp.ford.com:83"
+      - "http_proxy=http://internet.gcp.ford.com:83"
+      - "no_proxy=localhost,127.0.0.1,.googleapis.com,.google.internal"
+      - "JFROG_IMAGE_SCAN_FLAG=${_JFROG_IMAGE_SCAN_FLAG}"
+    args:
+      - -c
+      - |
+        if [ "$${JFROG_IMAGE_SCAN_FLAG}" == "Y" ]; then
+          set -e
+          echo "*** Starting Push image to JFrog Artifactory ***"
+          skopeo copy \
+            --dest-creds $$JFROG_USERNAME:$$JFROG_TOKEN \
+            docker-archive:/workspace/build-image.tar \
+            docker://${_JFROG_URL}/${_JFROG_ARTIFACTORY_REPOSITORY}/${_DOCKER_IMAGE}:${SHORT_SHA}
+          skopeo inspect --format '{{.Digest}}' \
+            --creds $$JFROG_USERNAME:$$JFROG_TOKEN \
+            docker://${_JFROG_URL}/${_JFROG_ARTIFACTORY_REPOSITORY}/${_DOCKER_IMAGE}:${SHORT_SHA} \
+            > /workspace/jfrog-image-digest.txt
+          rm -v /workspace/build-image.tar
+        else
+          echo "Skipping Push image to JFrog."
+        fi
+  - id: "Scan with Jfrog Xray"
+    name: fcr.ford.com/cybersecurity-devsecops/dso-utilities:ubi10.2
+    entrypoint: 'bash'
+    secretEnv:
+      - JFROG_USERNAME
+      - JFROG_TOKEN
+    env:
+      - "https_proxy=http://internet.gcp.ford.com:83"
+      - "http_proxy=http://internet.gcp.ford.com:83"
+      - "no_proxy=localhost,127.0.0.1,.googleapis.com,.google.internal"
+      - "JFROG_IMAGE_SCAN_FLAG=${_JFROG_IMAGE_SCAN_FLAG}"
+      - "JFROG_URL=${_JFROG_URL}"
+      - "JFROG_ARTIFACTORY_REPOSITORY=${_JFROG_ARTIFACTORY_REPOSITORY}"
+      - "JFROG_IMAGE=${_DOCKER_IMAGE}"
+      - "JFROG_IMAGE_TAG=${SHORT_SHA}"
+      - "EXIT_ON_ISSUE_FINDINGS=${_EXIT_ON_ISSUE_FINDINGS}"
+      - "BTCIS_DEBUG=false"
+      # metadata parameters
+      - "BTCIS_EAMSID=${_EAMSID}"
+      - "BTCIS_DEST_IMAGE_PATH=us-central1-docker.pkg.dev/${PROJECT_ID}/${_GCP_DOCKER_REPOSITORY_NAME}/${_DOCKER_IMAGE}:1.0"
+      - "BTCIS_GIT_REPOSITORY=${REPO_NAME}"
+      - "BTCIS_GIT_SOURCE_BRANCH=${BRANCH_NAME}"
+      - "BTCIS_GIT_COMMIT_SHA=${COMMIT_SHA}"
+    args:
+      - -c
+      - |
+        if [ "$${JFROG_IMAGE_SCAN_FLAG}" == "Y" ]; then
+          # Map Secret Manager env vars to the names the BTCIS script expects.
+          # When JFrog OIDC is available, replace these with the OIDC token exchange.
+          export JFROG_XRAY_USER=$$JFROG_USERNAME
+          export JFROG_XRAY_TOKEN=$$JFROG_TOKEN
+
+          if [ -f /workspace/image-digest.txt ] && [ -n "$(cat /workspace/image-digest.txt)" ]; then
+            export BTCIS_DEST_IMAGE_DIGEST=$(cat /workspace/image-digest.txt)
+          fi
+
+          echo "Trigger the BTCIS workflow script to generate the contextual analysis summary report"
+          SCRIPT_URL="https://$${JFROG_URL}/artifactory/dso-btcis-scripts/${_BTCIS_SCRIPT_VERSION}/contextual-analysis-api-summary.sh"
+          curl -fsSL --header "Authorization: Bearer $$JFROG_XRAY_TOKEN" "$$SCRIPT_URL" -o /tmp/contextual-analysis-api-summary.sh
+          bash /tmp/contextual-analysis-api-summary.sh
+        else
+          echo "Skipping Scan with JFrog Xray."
+        fi
+  - name: gcr.io/cloud-builders/gcloud
+    id: deploy-cloudrun
+    args:
+      - run
+      - deploy
+      - grid-api-v2
+      - '--image'
+      - >-
+        us-central1-docker.pkg.dev/$PROJECT_ID/grid-container-artifact-registry/grid-v2:1.0
+      - '--service-account'
+      - >-
+        sa-cldrun@$PROJECT_ID.iam.gserviceaccount.com
+      - '--project'
+      - $PROJECT_ID
+      - '--memory'
+      - $_MEMORY
+      - '--cpu'
+      - $_CPU
+      - '--ingress'
+      - internal
+      - '--min-instances'
+      - '1'
+      - '--port'
+      - '8080'
+      - '--max-instances'
+      - '1'
+      - '--vpc-egress'
+      - all-traffic
+      - '--vpc-connector'
+      - >-
+        $_VPC_CONNECTOR
+      - '--region'
+      - us-central1
+      - '--platform'
+      - managed
+      - '--allow-unauthenticated'
+      - '--no-cpu-throttling'
+      - '--update-secrets'
+      - '/var/secrets/mongo-cert.pem=grid-mongo-cert:latest'
+      - '--update-secrets'
+      - '/var/docusign/doc-cert.pem=docu_sign_client_secret:latest'
+      - '--set-env-vars'
+      - 'MONGO_CERT_PATH=/var/secrets/mongo-cert.pem,DOC_CERT_PATH=/var/docusign/doc-cert.pem'
+      - '--set-env-vars=DT_CLUSTER_ID=52407-GRID-SERVICE-${_ENV_NAME}'
+      - '--update-secrets=DT_TENANT=DYNATRACE_TENANT:latest'
+      - '--update-secrets=DT_TENANTTOKEN=DYNATRACE_TOKEN:latest'
+      - '--update-secrets=DT_CONNECTION_POINT=DYNATRACE_URL:latest'
+
+#  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+#    entrypoint: 'bash'
+#    args:
+#      - '-c'
+#      - |
+#        gcloud run services add-iam-policy-binding grid-api-v2 --member="serviceAccount:sa-apipub-cloud-run-vert06-pp@ford-3d93ace86713d94623abd389.iam.gserviceaccount.com" --role="roles/run.invoker" --region=us-central1 --project=$PROJECT_ID
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/fcr-docker-username/versions/latest
+      env: "USERNAME"
+    - versionName: projects/$PROJECT_ID/secrets/fcr-docker-password/versions/latest
+      env: "PASSWORD"
+    - versionName: projects/$PROJECT_ID/secrets/JFROG_USERNAME/versions/latest
+      env: "JFROG_USERNAME"
+    - versionName: projects/$PROJECT_ID/secrets/JFROG_PASSWORD/versions/latest
+      env: "JFROG_TOKEN"
+    - versionName: projects/$PROJECT_ID/secrets/SONARQUBE_TOKEN/versions/latest
+      env: "SONARQUBE_TOKEN"
+    - versionName: projects/$PROJECT_ID/secrets/FOSSA_API_KEY/versions/latest
+      env: "FOSSA_API_KEY"
+    - versionName: projects/$PROJECT_ID/secrets/CHECKMARX_PASSWORD/versions/latest
+      env: "CHECKMARX_PASSWORD"
+
+logsBucket: 'gs://grid-${_ENV_NAME}-cloudbuild-logs'
+substitutions:
+  _ENV_NAME: unused
+  _SPRING_PROFILES_ACTIVE: unused
+  _MEMORY: unused
+  _CPU: unused
+  _VPC_CONNECTOR: unused
+  _FOSSA_FLAG: unused
+  _CHECK_MARX_FLAG: unused
+  _SONNAR_CUBE_FLAG: unused
+  _JFROG_IMAGE_SCAN_FLAG: unused
+  _JFROG_URL: jfrog.ford.com
+  _JFROG_ARTIFACTORY_REPOSITORY: btciset-52407-aso-grid
+  _DOCKER_IMAGE: grid-v2
+  _GCP_DOCKER_REPOSITORY_NAME: grid-container-artifact-registry
+  _EXIT_ON_ISSUE_FINDINGS: unused
+  _EAMSID: unused
+  _BTCIS_SCRIPT_VERSION: v0.6.3
+serviceAccount: 'projects/$PROJECT_ID/serviceAccounts/sa-cldbld@$PROJECT_ID.iam.gserviceaccount.com'
+options:
+  logging: GCS_ONLY
+  workerPool: 'projects/ford-158dd864a0d0bbb6f103ff24/locations/us-central1/workerPools/workerpool-app-us-central1'
+  env:
+    - 'http_proxy=http://internet.gcp.ford.com:83'
+    - 'https_proxy=http://internet.gcp.ford.com:83'
+    - "GRADLE_NO_PROXY=*.ford.com"
+    - "GRADLE_PROXY=internet.gcp.ford.com"
+    - 'no_proxy=127.0.0.1,0.0.0.0,::1,localhost,.ford.com,.local,.testing,.internal,.googleapis.com,19.0.0.0/8,136.1.0.0/16,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16'
+gitConfig:
+  http:
+    proxySecretVersionName: 'projects/$PROJECT_NUMBER/secrets/proxy-internet/versions/latest'

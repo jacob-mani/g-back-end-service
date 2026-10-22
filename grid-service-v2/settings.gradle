@@ -1,0 +1,19 @@
+pluginManagement {
+    repositories {
+        maven { url 'https://jfrog.ford.com/artifactory/external-proxy-group/'
+            credentials {
+                username = System.getenv("JFROG_USERNAME")
+                password = System.getenv("JFROG_PASSWORD")
+            }
+        }
+
+        maven { url 'https://jfrog.ford.com/artifactory/public-maven-ford/'
+            credentials {
+                username = System.getenv("JFROG_USERNAME")
+                password = System.getenv("JFROG_PASSWORD")
+            }
+        }
+    }
+}
+
+rootProject.name = 'grid-v2'
